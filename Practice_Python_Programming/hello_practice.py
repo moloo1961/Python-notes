@@ -1,3 +1,4 @@
+# PRACTICE THE PRINT FUNCTION
 print("Hi, this is my first practice python code")
 print("Hi python") # learning to use print
 print('Hello python') # learning double/single quote

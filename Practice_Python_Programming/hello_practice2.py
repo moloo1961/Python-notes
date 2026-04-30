@@ -1,3 +1,4 @@
+# PRACTICE VARIABLES
 print("Marlene1\tMarlene2") # to use \t to create tab
 print("Your Learning Path:\n\t-Python Basics\n\t-Data Engineering\n\t-AI")
 # Use triple quotes to write in multiple line strings
