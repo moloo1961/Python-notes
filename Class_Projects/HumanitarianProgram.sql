@@ -292,4 +292,175 @@ ORDER BY county, rank_in_county;
 
 
 -- 5TH TASK - WINDOW FUNCTIONS
--- 1. 
+-- 1. Rank partners based on total beneficiaries
+WITH partner_totals AS (
+    SELECT
+        partner,
+        SUM(
+            CASE
+                WHEN beneficiary_type = 'Households' THEN beneficiaries * 6
+                ELSE beneficiaries
+            END
+        ) AS total_individuals
+    FROM beneficiary_partner_data
+    GROUP BY partner
+)
+SELECT
+    partner,
+    total_individuals,
+    RANK()       OVER (ORDER BY total_individuals DESC) AS rank_with_gaps,
+    DENSE_RANK() OVER (ORDER BY total_individuals DESC) AS rank_no_gaps
+FROM partner_totals
+ORDER BY total_individuals DESC;
+
+-- 2. Rank districts within each region based on beneficiaries served
+WITH sub_county_totals AS (
+    SELECT
+        jh_sub.name    AS sub_county,
+        jh_county.name AS county,
+        SUM(
+            CASE
+                WHEN bp.beneficiary_type = 'Households' THEN bp.beneficiaries * 6
+                ELSE bp.beneficiaries
+            END
+        ) AS total_beneficiaries
+    FROM jurisdiction_hierarchy jh_village
+    INNER JOIN jurisdiction_hierarchy jh_sub
+        ON jh_village.parent = jh_sub.name
+    INNER JOIN jurisdiction_hierarchy jh_county
+        ON jh_sub.parent = jh_county.name
+    INNER JOIN village_locations vl
+        ON jh_village.name = vl.village
+    LEFT JOIN beneficiary_partner_data bp
+        ON vl.village = bp.village
+    WHERE jh_village.level = 'Village'
+    GROUP BY jh_sub.name, jh_county.name
+)
+SELECT
+    county,
+    sub_county,
+    total_beneficiaries,
+    RANK() OVER (
+        PARTITION BY county
+        ORDER BY total_beneficiaries DESC
+    ) AS rank_in_county
+FROM sub_county_totals
+ORDER BY county, rank_in_county;
+
+-- 3. Top performing partner per district
+WITH partner_by_sub_county AS (
+    SELECT
+        jh_sub.name  AS sub_county,
+        bp.partner,
+        SUM(
+            CASE
+                WHEN bp.beneficiary_type = 'Households' THEN bp.beneficiaries * 6
+                ELSE bp.beneficiaries
+            END
+        ) AS total_beneficiaries
+    FROM beneficiary_partner_data bp
+    INNER JOIN village_locations vl
+        ON bp.village = vl.village
+    INNER JOIN jurisdiction_hierarchy jh_village
+        ON vl.village = jh_village.name
+    INNER JOIN jurisdiction_hierarchy jh_sub
+        ON jh_village.parent = jh_sub.name
+    GROUP BY jh_sub.name, bp.partner
+),
+ranked AS (
+    SELECT
+        sub_county,
+        partner,
+        total_beneficiaries,
+        ROW_NUMBER() OVER (
+            PARTITION BY sub_county
+            ORDER BY total_beneficiaries DESC
+        ) AS rn
+    FROM partner_by_sub_county
+)
+SELECT sub_county, partner, total_beneficiaries
+FROM ranked
+WHERE rn = 1
+ORDER BY sub_county;
+
+
+
+-- 6TH TASK - VIEWS
+-- 1. Create view district_summary with district-level beneficiaries, population, coverage, number of partners.
+CREATE VIEW IF NOT EXISTS district_summary AS
+SELECT
+    jh_sub.name  AS sub_county,
+    jh_county.name  AS county,
+    SUM(vl.total_population)  AS total_population,
+    SUM(
+        CASE
+            WHEN bp.beneficiary_type = 'Households' THEN bp.beneficiaries * 6
+            ELSE bp.beneficiaries
+        END
+    ) AS total_beneficiaries,
+    ROUND(
+        SUM(
+            CASE
+                WHEN bp.beneficiary_type = 'Households' THEN bp.beneficiaries * 6
+                ELSE bp.beneficiaries
+            END
+        ) * 1.0 / SUM(vl.total_population),
+    4)                                                   AS coverage_rate,
+    COUNT(DISTINCT bp.partner)                           AS num_partners
+FROM jurisdiction_hierarchy jh_village
+INNER JOIN jurisdiction_hierarchy jh_sub    ON jh_village.parent = jh_sub.name
+INNER JOIN jurisdiction_hierarchy jh_county ON jh_sub.parent = jh_county.name
+INNER JOIN village_locations vl             ON jh_village.name = vl.village
+LEFT  JOIN beneficiary_partner_data bp      ON vl.village = bp.village
+WHERE jh_village.level = 'Village'
+GROUP BY jh_sub.name, jh_county.name;
+
+-- 2. Create view partner_summary with partner name, villages served, districts reached, total beneficiaries.
+CREATE VIEW IF NOT EXISTS partner_summary AS
+SELECT
+    bp.partner,
+    COUNT(DISTINCT bp.village)   AS villages_served,
+    COUNT(DISTINCT jh_sub.name)  AS sub_counties_reached,
+    SUM(
+        CASE
+            WHEN bp.beneficiary_type = 'Households' THEN bp.beneficiaries * 6
+            ELSE bp.beneficiaries
+        END
+    )                            AS total_beneficiaries
+FROM beneficiary_partner_data bp
+INNER JOIN jurisdiction_hierarchy jh_village ON bp.village = jh_village.name
+INNER JOIN jurisdiction_hierarchy jh_sub     ON jh_village.parent = jh_sub.name
+GROUP BY bp.partner;
+
+
+
+-- 7TH TASK - TRIGGERS
+-- 1. Fire trigger after a new record is inserted.
+CREATE TABLE IF NOT EXISTS beneficiary_log (
+    log_id     INTEGER  PRIMARY KEY AUTOINCREMENT,
+    log_time   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    message    TEXT
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_log_insert
+AFTER INSERT ON beneficiary_partner_data
+BEGIN
+    INSERT INTO beneficiary_log (message)
+    VALUES (
+        'New record inserted: Partner ' || NEW.partner ||
+        ' served ' || NEW.beneficiaries ||
+        ' ' || NEW.beneficiary_type ||
+        ' in ' || NEW.village
+    );
+END;
+
+-- 2. Fire trigger to prevent inserting negative beneficiaries
+CREATE TRIGGER IF NOT EXISTS trg_prevent_negative
+BEFORE INSERT ON beneficiary_partner_data
+BEGIN
+    SELECT RAISE(ABORT, 'Error: beneficiaries cannot be negative.')
+    WHERE NEW.beneficiaries < 0;
+END;
+ 
+-- 8TH TASK - STORED PROCEDURES
+-- SQLite does not support NOTE: CHECK OUT MYSQL?
